@@ -956,7 +956,7 @@ public:
 class NTKRoPE final : public Layer {
 public:
     NTKRoPE() = default;
-    NTKRoPE(RoPEType type, float theta, int max_position_embeddings, int original_max_position_embeddings, const std::vector<float> &long_factor, const std::vector<float> &short_factor, std::string name) {
+    NTKRoPE(RoPEType type, float theta, int max_position_embeddings, int original_max_position_embeddings, const std::vector<float> &long_factor, const std::vector<float> &short_factor, std::string name, float partial_rotary_factor = 1.0f) {
         init(std::move(name), OpType::NTKROPE);
         param_["pose_type"] = (float)type;
         param_["theta"] = theta;
@@ -970,6 +970,7 @@ public:
         for (int i = 0; i < short_factor.size(); i++) {
             param_["short_factor_" + std::to_string(i)] = short_factor[i];
         }
+        param_["partial_rotary_factor"] = partial_rotary_factor;
     }
 
     Tensor operator()(Tensor input) {
