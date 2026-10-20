@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include "mllm/backends/ascend/graph/AscendPagedAttentionPlugin.hpp"
 #include <string>
 #include <vector>
 
@@ -23,14 +24,16 @@ inline std::vector<Tensor> QwenAscendDecoder::forward(const std::vector<Tensor>&
   auto local_rope_pos_ids = inputs[3];
   auto past_kv_cache = args[0].get<mllm::ascend::AscendKVCache*>();
 
+  auto* paged = past_kv_cache->pagedCache();
   if (canUseGraph(inputs[0])) {
+    if (paged) paged->prepareGraphMetadata();
     ensureGraphExecutor();
 
     const int batch_size = inputs[0].shape()[0];
     const int seq_len = inputs[0].shape()[1];
     const auto dtype = inputs[0].dtype();
     const auto device = inputs[0].device();
-    const int old_seq_len = past_kv_cache->getCurrentSeqCnt(self_attn_.layer_idx_);
+    const int old_seq_len = paged ? 0 : past_kv_cache->getCurrentSeqCnt(self_attn_.layer_idx_);
     if (old_seq_len + seq_len > past_kv_cache->getMaxCacheLength()) {
       MLLM_ERROR_EXIT(ExitCode::kCoreError,
                       "AscendKVCache: sequence length {} + {} exceeds max_cache_length {}",
@@ -40,7 +43,7 @@ inline std::vector<Tensor> QwenAscendDecoder::forward(const std::vector<Tensor>&
     }
 
     auto attn_scale = decoder_graph_runner_.attentionScaleTensor(self_attn_.head_dim_, dtype, device);
-    auto current_seq_len = decoder_graph_runner_.currentSeqLenTensor(old_seq_len);
+    auto current_seq_len = decoder_graph_runner_.currentSeqLenTensor(old_seq_len, paged != nullptr);
     auto output = Tensor::empty({batch_size, seq_len, self_attn_.hidden_size_}, dtype, device).alloc();
 
     std::vector<Tensor> graph_inputs;
@@ -63,8 +66,8 @@ inline std::vector<Tensor> QwenAscendDecoder::forward(const std::vector<Tensor>&
           self_attn_.v_proj_.weight(), v_op.biasInt32Npu(), v_op.deqScaleNpu(),
           self_attn_.rms_norm_q_.weight(),
           self_attn_.rms_norm_k_.weight(),
-          past_kv_cache->getKCacheBuffer(self_attn_.layer_idx_),
-          past_kv_cache->getVCacheBuffer(self_attn_.layer_idx_),
+          paged ? paged->keyPool(self_attn_.layer_idx_) : past_kv_cache->getKCacheBuffer(self_attn_.layer_idx_),
+          paged ? paged->valuePool(self_attn_.layer_idx_) : past_kv_cache->getVCacheBuffer(self_attn_.layer_idx_),
           current_seq_len,
           attn_scale,
           self_attn_.o_proj_.weight(), o_op.biasInt32Npu(), o_op.deqScaleNpu(),
@@ -85,8 +88,8 @@ inline std::vector<Tensor> QwenAscendDecoder::forward(const std::vector<Tensor>&
           self_attn_.v_proj_.weight(),
           self_attn_.rms_norm_q_.weight(),
           self_attn_.rms_norm_k_.weight(),
-          past_kv_cache->getKCacheBuffer(self_attn_.layer_idx_),
-          past_kv_cache->getVCacheBuffer(self_attn_.layer_idx_),
+          paged ? paged->keyPool(self_attn_.layer_idx_) : past_kv_cache->getKCacheBuffer(self_attn_.layer_idx_),
+          paged ? paged->valuePool(self_attn_.layer_idx_) : past_kv_cache->getVCacheBuffer(self_attn_.layer_idx_),
           current_seq_len,
           attn_scale,
           self_attn_.o_proj_.weight(),
@@ -102,9 +105,38 @@ inline std::vector<Tensor> QwenAscendDecoder::forward(const std::vector<Tensor>&
         graph_inputs.push_back(self_attn_.o_proj_.bias());
       }
     }
+    if (paged) {
+      graph_inputs.insert(graph_inputs.end(), {paged->slotMapping(), paged->graphBlockTable(),
+          paged->graphLengthsHost(), paged->graphLengthsDevice()});
+    }
+    std::vector<size_t> nz_inputs;
+    {
+      const std::vector<std::pair<size_t, const nn::Linear*>> weights = isW8A8Mode()
+          ? std::vector<std::pair<size_t,const nn::Linear*>>{
+              {5,&self_attn_.q_proj_},{8,&self_attn_.k_proj_},{11,&self_attn_.v_proj_},
+              {20,&self_attn_.o_proj_},{24,&mlp_.gate_proj_},{27,&mlp_.up_proj_},{30,&mlp_.down_proj_}}
+          : std::vector<std::pair<size_t,const nn::Linear*>>{
+              {5,&self_attn_.q_proj_},{6,&self_attn_.k_proj_},{7,&self_attn_.v_proj_},
+              {14,&self_attn_.o_proj_},{16,&mlp_.gate_proj_},{17,&mlp_.up_proj_},{18,&mlp_.down_proj_}};
+      for (auto [index, linear] : weights) {
+        auto* op=getAscendLinearOpPtr(*linear);
+        if (op && !op->nzWeight().isNil()) {
+          MLLM_RT_ASSERT(graph_inputs[index].ptr<void>()==linear->weight().ptr<void>());
+          graph_inputs[index]=op->nzWeight(); nz_inputs.push_back(index);
+        }
+      }
+    }
+    if (packed_projections_) {
+      graph_inputs[5]=packed_qkv_.prepare({self_attn_.q_proj_.weight(),self_attn_.k_proj_.weight(),self_attn_.v_proj_.weight()});
+      graph_inputs[16]=packed_gate_up_.prepare({mlp_.gate_proj_.weight(),mlp_.up_proj_.weight()});
+    }
     std::vector<Tensor> graph_outputs = {output};
-    decoder_graph_runner_.execute(graph_inputs, graph_outputs);
-    past_kv_cache->advanceSeqCnt(self_attn_.layer_idx_, seq_len);
+    auto* submission = args.size()>1 ? args[1].get<mllm::ascend::AscendGraphSubmissionScope*>() : nullptr;
+    const bool deferred = submission && submission->enabled();
+    if (deferred) submission->retain(graph_inputs,graph_outputs);
+    decoder_graph_runner_.execute(graph_inputs, graph_outputs, nz_inputs, !deferred);
+    if (paged) paged->markGraphLayerWritten(self_attn_.layer_idx_);
+    else past_kv_cache->advanceSeqCnt(self_attn_.layer_idx_, seq_len);
     return {output};
   }
 
@@ -124,7 +156,7 @@ inline bool QwenAscendDecoder::isW8A8Mode() const {
 
 inline bool QwenAscendDecoder::canUseGraph(const Tensor& hidden_states) const {
   if (!isQwenAscendDecoderGraphEnabled()) return false;
-  if (hidden_states.shape()[0] != 1) return false;
+  if (!paged_graph_ && hidden_states.shape()[0] != 1) return false;
   if (hidden_states.device() != kAscend) return false;
   if (hidden_states.dtype() != kFloat16) return false;
 
@@ -186,6 +218,14 @@ inline void QwenAscendDecoder::buildDecoderGraph() {
     buildDecoderGraphW8A8();
     return;
   }
+  const char* packed_flag=std::getenv("MLLM_ASCEND_PACKED_PROJECTIONS");
+  packed_projections_=!attention_bias_ && mllm::ascend::useNZWeights()
+      && (!packed_flag || packed_flag[0]!='0');
+  if (packed_projections_) {
+    for (const auto& w : {self_attn_.q_proj_.weight(),self_attn_.k_proj_.weight(),
+                         self_attn_.v_proj_.weight(),mlp_.gate_proj_.weight(),mlp_.up_proj_.weight()})
+      if(w.rank()!=2 || w.size(0)%16 || w.size(1)%16) packed_projections_=false;
+  }
   buildDecoderGraphFP16();
 }
 
@@ -220,9 +260,12 @@ inline void QwenAscendDecoder::buildDecoderGraphFP16() {
     input_names.push_back("o_bias");
   }
 
+  if (paged_graph_) {
+    input_names.insert(input_names.end(), {"paged_slots","paged_table","paged_lengths_host","paged_lengths_device"});
+  }
   AscendGraphBuilder builder;
   builder.beginGraph(
-      "QwenAscendDecoderGraph_" + std::to_string(self_attn_.layer_idx_),
+      (paged_graph_ ? "QwenAscendPagedDecoderGraph_" : "QwenAscendDecoderGraph_") + std::to_string(self_attn_.layer_idx_),
       input_names,
       {"decoder_output"},
       [this](const atb::SVector<atb::TensorDesc>& inTensorDescs,
@@ -240,7 +283,16 @@ inline void QwenAscendDecoder::buildDecoderGraphFP16() {
       {"hidden_states", "input_norm_weight"},
       {"normed_hidden_states"});
 
-  if (attention_bias_) {
+  if (packed_projections_) {
+    builder.addOperation(createLinearGraphOp(false), {"normed_hidden_states","q_weight"}, {"qkv_linear"});
+    atb::infer::SplitParam split;
+    split.splitDim=2; split.splitNum=3;
+    split.splitSizes={self_attn_.num_attention_heads_*self_attn_.head_dim_,
+                     self_attn_.num_key_value_heads_*self_attn_.head_dim_,
+                     self_attn_.num_key_value_heads_*self_attn_.head_dim_};
+    atb::Operation* op=nullptr; MLLM_ATB_CHECK(atb::CreateOperation(split,&op));
+    builder.addOperation(op,{"qkv_linear"},{"q_linear","k_linear","v_linear"});
+  } else if (attention_bias_) {
     builder.addOperation(createLinearGraphOp(true), {"normed_hidden_states", "q_weight", "q_bias"}, {"q_linear"});
     builder.addOperation(createLinearGraphOp(true), {"normed_hidden_states", "k_weight", "k_bias"}, {"k_linear"});
     builder.addOperation(createLinearGraphOp(true), {"normed_hidden_states", "v_weight", "v_bias"}, {"v_linear"});
@@ -313,31 +365,39 @@ inline void QwenAscendDecoder::buildDecoderGraphFP16() {
                        {"k_normed", "k_normed", "cos_emb_2d", "sin_emb_2d", "rope_pos_ids_1d"},
                        {"k_rope_4d", "k_rope_unused"});
 
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"q_rope_4d"}, {"query_states"});
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"k_rope_4d"}, {"key_states"});
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"v_linear_4d"}, {"value_states"});
+  if (paged_graph_) {
+    builder.addOperation(new AscendPagedAttentionPlugin(self_attn_.num_attention_heads_,
+        self_attn_.num_key_value_heads_, self_attn_.head_dim_, paged_graph_nz_),
+        {"q_rope_4d","k_rope_4d","v_linear_4d","k_cache_storage","v_cache_storage",
+         "paged_slots","paged_table","paged_lengths_host","paged_lengths_device"},
+        {"attn_context_transposed"});
+  } else {
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"q_rope_4d"}, {"query_states"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"k_rope_4d"}, {"key_states"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"v_linear_4d"}, {"value_states"});
 
-  std::vector<std::string> attention_inputs = {
-      "query_states",
-      "key_states",
-      "value_states",
-      "k_cache_storage",
-      "v_cache_storage",
-      "current_seq_len",
-      "attn_scale",
-  };
-  const std::string layer_sfx = "_L" + std::to_string(self_attn_.layer_idx_);
-  builder.addOperation(createAttentionWithKVCachePluginGraphOp(self_attn_.num_attention_heads_,
-                                                               self_attn_.num_key_value_heads_,
-                                                               self_attn_.head_dim_,
-                                                               max_cache_length_,
-                                                               false,
-                                                               0,
-                                                               layer_sfx,
-                                                               decoder_graph_runner_.setupBucketSize()),
-                       attention_inputs,
-                       {"attn_context"});
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"attn_context"}, {"attn_context_transposed"});
+    std::vector<std::string> attention_inputs = {
+        "query_states",
+        "key_states",
+        "value_states",
+        "k_cache_storage",
+        "v_cache_storage",
+        "current_seq_len",
+        "attn_scale",
+    };
+    const std::string layer_sfx = "_L" + std::to_string(self_attn_.layer_idx_);
+    builder.addOperation(createAttentionWithKVCachePluginGraphOp(self_attn_.num_attention_heads_,
+                                                                 self_attn_.num_key_value_heads_,
+                                                                 self_attn_.head_dim_,
+                                                                 max_cache_length_,
+                                                                 false,
+                                                                 0,
+                                                                 layer_sfx,
+                                                                 decoder_graph_runner_.setupBucketSize()),
+                         attention_inputs,
+                         {"attn_context"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"attn_context"}, {"attn_context_transposed"});
+  }
   builder.reshape("attn_context_transposed",
                   [](const atb::Dims& oldShape, atb::Dims& newShape) {
                     newShape.dimNum = 3;
@@ -356,10 +416,29 @@ inline void QwenAscendDecoder::buildDecoderGraphFP16() {
   builder.addOperation(createRmsNormGraphOp(rms_norm_epsilon_),
                        {"residual_after_attn", "post_norm_weight"},
                        {"mlp_input"});
-  builder.addOperation(createLinearGraphOp(false), {"mlp_input", "gate_weight"}, {"gate_proj_out"});
-  builder.addOperation(createSiLUGraphOp(), {"gate_proj_out"}, {"gate_activated"});
-  builder.addOperation(createLinearGraphOp(false), {"mlp_input", "up_weight"}, {"up_proj_out"});
-  builder.addOperation(createMulGraphOp(), {"gate_activated", "up_proj_out"}, {"mlp_gated"});
+  const char* fused_flag=std::getenv("MLLM_ASCEND_FUSED_MLP_ACTIVATION");
+  const bool fused_activation=packed_projections_ && (!fused_flag || fused_flag[0]!='0');
+  if (packed_projections_) {
+    builder.addOperation(createLinearGraphOp(false), {"mlp_input","gate_weight"}, {"gate_up"});
+    if (fused_activation) {
+      atb::infer::ActivationParam activation;
+      activation.activationType=atb::infer::ACTIVATION_SWIGLU_FORWARD;
+      activation.dim=-1;
+      atb::Operation* op=nullptr; MLLM_ATB_CHECK(atb::CreateOperation(activation,&op));
+      builder.addOperation(op,{"gate_up"},{"mlp_gated"});
+    } else {
+      atb::infer::SplitParam split; split.splitDim=2; split.splitNum=2;
+      atb::Operation* op=nullptr; MLLM_ATB_CHECK(atb::CreateOperation(split,&op));
+      builder.addOperation(op,{"gate_up"},{"gate_proj_out","up_proj_out"});
+    }
+  } else {
+    builder.addOperation(createLinearGraphOp(false), {"mlp_input", "gate_weight"}, {"gate_proj_out"});
+    builder.addOperation(createLinearGraphOp(false), {"mlp_input", "up_weight"}, {"up_proj_out"});
+  }
+  if (!fused_activation) {
+    builder.addOperation(createSiLUGraphOp(), {"gate_proj_out"}, {"gate_activated"});
+    builder.addOperation(createMulGraphOp(), {"gate_activated", "up_proj_out"}, {"mlp_gated"});
+  }
   builder.addOperation(createLinearGraphOp(false), {"mlp_gated", "down_weight"}, {"mlp_output"});
   builder.addOperation(createAddGraphOp(), {"mlp_output", "residual_after_attn"}, {"decoder_output"});
 
@@ -400,9 +479,12 @@ inline void QwenAscendDecoder::buildDecoderGraphW8A8() {
       "down_weight", "down_bias_i32", "down_deq_scale",
   };
 
+  if (paged_graph_) {
+    input_names.insert(input_names.end(), {"paged_slots","paged_table","paged_lengths_host","paged_lengths_device"});
+  }
   AscendGraphBuilder builder;
   builder.beginGraph(
-      "QwenAscendDecoderGraphW8A8_" + std::to_string(self_attn_.layer_idx_),
+      (paged_graph_ ? "QwenAscendPagedDecoderGraphW8A8_" : "QwenAscendDecoderGraphW8A8_") + std::to_string(self_attn_.layer_idx_),
       input_names,
       {"decoder_output"},
       [this](const atb::SVector<atb::TensorDesc>& inTensorDescs,
@@ -494,24 +576,32 @@ inline void QwenAscendDecoder::buildDecoderGraphW8A8() {
                        {"k_normed", "k_normed", "cos_emb_2d", "sin_emb_2d", "rope_pos_ids_1d"},
                        {"k_rope_4d", "k_rope_unused"});
 
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"q_rope_4d"}, {"query_states"});
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"k_rope_4d"}, {"key_states"});
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"v_linear_4d"}, {"value_states"});
+  if (paged_graph_) {
+    builder.addOperation(new AscendPagedAttentionPlugin(self_attn_.num_attention_heads_,
+        self_attn_.num_key_value_heads_, self_attn_.head_dim_, paged_graph_nz_),
+        {"q_rope_4d","k_rope_4d","v_linear_4d","k_cache_storage","v_cache_storage",
+         "paged_slots","paged_table","paged_lengths_host","paged_lengths_device"},
+        {"attn_context_transposed"});
+  } else {
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"q_rope_4d"}, {"query_states"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"k_rope_4d"}, {"key_states"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"v_linear_4d"}, {"value_states"});
 
-  builder.addOperation(createAttentionWithKVCachePluginGraphOp(self_attn_.num_attention_heads_,
-                                                               self_attn_.num_key_value_heads_,
-                                                               self_attn_.head_dim_,
-                                                               max_cache_length_,
-                                                               false,
-                                                               0,
-                                                               layer_sfx,
-                                                               decoder_graph_runner_.setupBucketSize()),
-                       {"query_states", "key_states", "value_states",
-                        "k_cache_storage", "v_cache_storage",
-                        "current_seq_len", "attn_scale"},
-                       {"attn_context"});
+    builder.addOperation(createAttentionWithKVCachePluginGraphOp(self_attn_.num_attention_heads_,
+                                                                 self_attn_.num_key_value_heads_,
+                                                                 self_attn_.head_dim_,
+                                                                 max_cache_length_,
+                                                                 false,
+                                                                 0,
+                                                                 layer_sfx,
+                                                                 decoder_graph_runner_.setupBucketSize()),
+                         {"query_states", "key_states", "value_states",
+                          "k_cache_storage", "v_cache_storage",
+                          "current_seq_len", "attn_scale"},
+                         {"attn_context"});
 
-  builder.addOperation(createTransposeGraphOp(4, 1, 2), {"attn_context"}, {"attn_context_transposed"});
+    builder.addOperation(createTransposeGraphOp(4, 1, 2), {"attn_context"}, {"attn_context_transposed"});
+  }
   builder.reshape("attn_context_transposed",
                   [](const atb::Dims& oldShape, atb::Dims& newShape) {
                     newShape.dimNum = 3;

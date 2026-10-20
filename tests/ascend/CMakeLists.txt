@@ -1,4 +1,5 @@
 add_executable(Mllm-Test-AscendKernel KernelTest.cpp)
+target_compile_definitions(Mllm-Test-AscendKernel PRIVATE MLLM_BUILD_ASCEND_BACKEND)
 
 if(DEFINED ENV{ASCEND_HOME_PATH})
   target_include_directories(Mllm-Test-AscendKernel PRIVATE $ENV{ASCEND_HOME_PATH}/include)

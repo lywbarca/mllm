@@ -20,8 +20,10 @@ class AscendGraphExecutor {
   ~AscendGraphExecutor();
 
   // Execute the graph with given inputs and outputs.
+  // synchronize=false requires the caller to retain inputs/outputs and this
+  // executor until stream completion, before reusing its Setup/workspace state.
   void execute(const std::vector<Tensor>& inputs,
-               std::vector<Tensor>& outputs);
+               std::vector<Tensor>& outputs, const std::vector<size_t>& nz_inputs = {}, bool synchronize = true);
 
   // Get current workspace size in bytes.
   uint64_t workspaceSize() const { return workspace_size_; }

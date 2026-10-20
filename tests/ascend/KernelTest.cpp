@@ -1,3 +1,5 @@
+#include "AscendFillOwnershipTest.hpp"
+#include "AscendHostCastTest.hpp"
 // Copyright (c) MLLM Team.
 // Licensed under the MIT License.
 
@@ -7,8 +9,12 @@
 
 /// Kernel tests
 #include "AscendKernelTest.hpp"
+#include "AscendDeviceOwnershipTest.hpp"
 #include "AscendAclnnKernelTest.hpp"
 #include "AscendBroadcastKernelTest.hpp"
+#include "AscendPagedAttnKernelTest.hpp"
+#include "AscendRealPagedAttentionTest.hpp"
+#include "AscendPagedKVCacheTest.hpp"
 
 //===----------------------------------------------------------------------===//
 // Graph Builder tests.
@@ -353,6 +359,7 @@ TEST_F(AscendTransposeKernelTest, TransposeFloat16) {
 // FP16 (Ascend currently uses FP16)
 //===----------------------------------------------------------------------===//
 #include "AscendAttentionKernelTest.hpp"
+#include "AscendContiguousAttentionTest.hpp"
 TEST_F(AscendAttentionKernelTest, ScaledDotProductAttentionFloat16) {
   EXPECT_EQ(ScaledDotProductAttentionFloat16Test({
                 // {Q_shape, K_shape, V_shape}
@@ -486,6 +493,9 @@ TEST_F(AscendRoPEKernelTest, RoPEFloat16) {
             true);
 }
 
+#include "AscendNZWeightTest.hpp"
+#include "AscendSubmissionReuseTest.hpp"
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   
@@ -503,3 +513,9 @@ int main(int argc, char** argv) {
   
   return ret;
 }
+
+#include "AscendFusionSelectionTest.hpp"
+
+#include "AscendW8A8SmokeTest.hpp"
+
+#include "AscendNativeQuantTest.hpp"

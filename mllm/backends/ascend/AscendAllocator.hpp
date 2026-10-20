@@ -12,6 +12,8 @@
 
 namespace mllm::ascend {
 
+class AscendMemoryPool;
+
 class AscendAllocator final : public Allocator {
  public:
   AscendAllocator();
@@ -39,7 +41,11 @@ class AscendAllocator final : public Allocator {
 
 private:
   std::mutex block_map_mutex_;
-  std::unordered_map<void*, int> storage_to_block_id_;  // Storage ptr -> block ID
+  struct Allocation {
+    std::shared_ptr<AscendMemoryPool> pool;
+    int block_id;
+  };
+  std::unordered_map<void*, Allocation> storage_to_block_id_;  // Pointer -> owning pool and block
 
 };
 

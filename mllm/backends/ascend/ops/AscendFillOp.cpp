@@ -18,7 +18,8 @@ namespace mllm::ascend {
 AscendFillOp::AscendFillOp(const aops::FillOpOptions& options) : aops::FillOp(options) {}
 
 void AscendFillOp::setup(const std::vector<Tensor>& inputs, std::vector<Tensor>& outputs) {
-  BaseOp::setup(inputs, outputs);
+  // Fill aliases its already allocated input; reallocating would lose the old block.
+  aops::FillOp::setup(inputs, outputs);
 }
 
 void AscendFillOp::forward(const std::vector<Tensor>& inputs, std::vector<Tensor>& outputs) {

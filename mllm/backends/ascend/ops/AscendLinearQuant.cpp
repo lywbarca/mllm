@@ -7,6 +7,7 @@
 #include <aclnnop/aclnn_trans_quant_param.h>
 
 #include <cstdint>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -73,8 +74,10 @@ AscendLinearW8A8Artifacts prepareLinearW8A8Artifacts(const std::string& layer_na
                     layer_name);
   }
 
-  artifacts.scale_x = artifacts.scale_x_cpu.ptr<float>()[0];
-  if (artifacts.scale_x <= 0.0f) {
+  // Native ATB activation quantization consumes an FP16 step. Use exactly
+  // that representable step for fused matmul dequantization as well.
+  artifacts.scale_x = float(static_cast<mllm_fp16_t>(artifacts.scale_x_cpu.ptr<float>()[0]));
+  if (!std::isfinite(artifacts.scale_x) || artifacts.scale_x <= 0.0f) {
     MLLM_ERROR_EXIT(ExitCode::kAscendError,
                     "AscendLinearOp W8A8 load: layer {} has non-positive scale_x={}",
                     layer_name,

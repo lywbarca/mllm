@@ -198,7 +198,8 @@ void AscendRoPEOp::forward(const std::vector<Tensor>& inputs, std::vector<Tensor
 
   // Create position_ids tensor on device
   // For multi-batch case, we need position IDs for each token in each batch
-  // Position IDs repeat for each batch: [0, 1, 2, ..., S-1, 0, 1, 2, ..., S-1, ...]
+  // cos/sin are flattened to [B*S,D]. Index the row for this batch too;
+  // repeating [0..S) would apply request 0's RoPE positions to every request.
   int pos_ids_block_id = -1;
   void* pos_ids_ptr = nullptr;
   size_t pos_ids_size = static_cast<size_t>(num_tokens) * sizeof(int32_t);
@@ -209,7 +210,7 @@ void AscendRoPEOp::forward(const std::vector<Tensor>& inputs, std::vector<Tensor
   std::vector<int32_t> pos_ids_host(num_tokens);
   for (int64_t b = 0; b < batch_size; ++b) {
     for (int64_t s = 0; s < seq_len; ++s) {
-      pos_ids_host[b * seq_len + s] = static_cast<int32_t>(s);
+      pos_ids_host[b * seq_len + s] = static_cast<int32_t>(b * seq_len + s);
     }
   }
   aclrtMemcpy(pos_ids_ptr, pos_ids_size, pos_ids_host.data(), pos_ids_size, ACL_MEMCPY_HOST_TO_DEVICE);

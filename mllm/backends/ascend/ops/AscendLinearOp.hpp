@@ -28,7 +28,9 @@ class AscendLinearOp final : public aops::LinearOp {
   [[nodiscard]] const Tensor& deqScaleWNpu() const { return deq_scale_w_npu_; }
   [[nodiscard]] bool isW8A8() const { return !deq_scale_npu_.isNil(); }
 
+  const Tensor& nzWeight() const { return nz_weight_; }
  private:
+  Tensor nz_weight_;
   // W8A8 quantization artifacts — populated in load() when weight dtype is INT8.
   float scale_x_ = 0.0f;        // per-tensor activation scale scalar
   Tensor scale_w_;               // FP32 [N] on CPU — retained so getParams() can round-trip it

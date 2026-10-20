@@ -130,7 +130,7 @@ AscendGraphExecutor::~AscendGraphExecutor() {
 }
 
 void AscendGraphExecutor::execute(const std::vector<Tensor>& inputs,
-                                   std::vector<Tensor>& outputs) {
+                                   std::vector<Tensor>& outputs, const std::vector<size_t>& nz_inputs, bool synchronize) {
   const bool profile_enabled = shouldProfileAscendGraph();
   const auto total_start = profile_enabled ? Clock::now() : Clock::time_point{};
   double setup_ms = 0.0;
@@ -146,6 +146,15 @@ void AscendGraphExecutor::execute(const std::vector<Tensor>& inputs,
 
   for (size_t i = 0; i < inputs.size(); ++i) {
     fillAtbTensor(inputs[i], variantPack.inTensors[i]);
+    if (inputs[i].device() == kCPU) {
+      variantPack.inTensors[i].hostData = inputs[i].ptr<void>();
+      variantPack.inTensors[i].deviceData = nullptr;
+    }
+  }
+
+  for (auto i : nz_inputs) {
+    MLLM_RT_ASSERT(i < variantPack.inTensors.size());
+    variantPack.inTensors[i].desc.format = ACL_FORMAT_FRACTAL_NZ;
   }
 
   for (size_t i = 0; i < outputs.size(); ++i) {
@@ -198,9 +207,10 @@ void AscendGraphExecutor::execute(const std::vector<Tensor>& inputs,
   }
   if (profile_enabled) execute_ms = elapsedMs(execute_start, Clock::now());
 
+  // Deferred execution is only safe inside a submission scope retaining tensors.
   // 5. Synchronize stream to ensure execution completes
   const auto sync_start = profile_enabled ? Clock::now() : Clock::time_point{};
-  syncGlobalAtbStream();
+  if (synchronize) syncGlobalAtbStream();
   if (profile_enabled) {
     sync_ms = elapsedMs(sync_start, Clock::now());
     recordGraphProfile(graph_name,

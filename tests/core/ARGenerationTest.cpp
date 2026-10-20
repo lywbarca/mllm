@@ -35,6 +35,17 @@ class FakeGeneration final : public ARGeneration {
     return {{"sequence", logits}};
   }
 
+  std::vector<bool> greedy_requests;
+  int greedy_selections=0;
+  ARGenerationOutputPast forwardForGeneration(const ARGenerationOutputPast& input,
+      const ARGenerationArgs& args,bool greedy) override {
+    greedy_requests.push_back(greedy);
+    return forward(input,args);
+  }
+  int64_t selectGreedy(Tensor logits,bool suppress,int64_t eos) override {
+    ++greedy_selections;
+    return ARGeneration::selectGreedy(logits,suppress,eos);
+  }
   void resetTokens(std::vector<int64_t> tokens) {
     tokens_ = std::move(tokens);
     forward_count_ = 0;
@@ -62,6 +73,26 @@ std::vector<int64_t> runChat(FakeGeneration& model, int max_length, int eos_toke
   };
   for (const auto& step : model.chat({{"sequence", makeInput(3)}}, args)) { tokens.push_back(step.cur_token_id); }
   return tokens;
+}
+
+TEST(ARGenerationPerformanceTest, GenerationHooksPreserveGreedyAndSamplingModes) {
+  for(int api=0;api<3;++api)for(int mode=0;mode<4;++mode) {
+    bool sample=mode!=0;
+    FakeGeneration model({0,1,2});
+    ARGenerationArgs args{{"max_length",AnyValue(3)},{"eos_token_id",AnyValue(3)},
+                          {"top_k",AnyValue(mode==1 ? 1 : 0)},
+                          {"top_p",AnyValue(mode==2 ? 0.01f : 0.f)},
+                          {"temperature",AnyValue(mode==3 ? 0.01f : 1.f)}};
+    ARGenerationOutputPast input{{"sequence",makeInput(3)}};
+    std::vector<int64_t> tokens;
+    if(api==0) for(const auto& step:model.chat(input,args))tokens.push_back(step.cur_token_id);
+    else if(api==1) model.streamGenerate(input,args,[&](int64_t t){tokens.push_back(t);});
+    else model.generate(input,args);
+    ASSERT_EQ(model.greedy_requests.size(),3);
+    for(bool requested:model.greedy_requests)EXPECT_EQ(requested,!sample);
+    EXPECT_EQ(model.greedy_selections,sample ? 0 : 3);
+    if(api!=2)EXPECT_EQ(tokens,(std::vector<int64_t>{0,1,2}));
+  }
 }
 
 TEST(ARGenerationPerformanceTest, MaxLengthProducesCompleteStats) {

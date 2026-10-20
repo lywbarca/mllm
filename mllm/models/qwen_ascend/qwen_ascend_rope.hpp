@@ -118,7 +118,7 @@ class QwenAscendRoPECache final {
       cached_max_seq_len_ = cache_size;
     }
 
-    if (seq_len > 1 && pos_ptr[0] == 0) {
+    if (batch_size == 1 && seq_len > 1 && pos_ptr[0] == 0) {
       bool is_contiguous = true;
       for (int i = 1; i < seq_len; ++i) {
         if (pos_ptr[i] != i) {

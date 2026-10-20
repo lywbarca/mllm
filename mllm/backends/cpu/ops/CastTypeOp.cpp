@@ -174,6 +174,19 @@ void CPUCastTypeOp::forward(const std::vector<Tensor>& inputs, std::vector<Tenso
     }
     default: NYI("CastTypeOp not implemented for this data type");
   }
+#else
+  // Portable FP conversions for hosts without the ARM cast kernels.
+  if (i.dtype() == kFloat16 && to_dtype == kFloat32) {
+    const auto* src = i.ptr<mllm_fp16_t>();
+    auto* dst = o.ptr<mllm_fp32_t>();
+    for (size_t n = 0; n < i.numel(); ++n) { dst[n] = static_cast<mllm_fp32_t>(src[n]); }
+  } else if (i.dtype() == kFloat32 && to_dtype == kFloat16) {
+    const auto* src = i.ptr<mllm_fp32_t>();
+    auto* dst = o.ptr<mllm_fp16_t>();
+    for (size_t n = 0; n < i.numel(); ++n) { dst[n] = static_cast<mllm_fp16_t>(src[n]); }
+  } else {
+    NYI("CastTypeOp not implemented for this data type on this host");
+  }
 #endif
 }
 

@@ -89,7 +89,7 @@ void ARGenerationChatIterator::step() {
     gen_->decodeEventStartTimePoint();
   }
 
-  ARGenerationOutputPast output = gen_->forward(current_input_, args_);
+  ARGenerationOutputPast output = gen_->forwardForGeneration(current_input_, args_, !use_sampling);
 
   // Timing
   if (step_count_ == 0) {
@@ -98,11 +98,12 @@ void ARGenerationChatIterator::step() {
   }
 
   Tensor logits = output["sequence"];
-  auto device = logits.device();
-  logits = logits.to(kCPU);
-  if (step_count_ + 1 < min_new_tokens_) { gen_->suppressEosLogits(logits, eos_token_id_); }
+  auto device = gen_->generationInputDevice(logits);
+
   int64_t next_token_id;
   if (use_sampling) {
+    logits = logits.to(kCPU);
+    if (step_count_ + 1 < min_new_tokens_) { gen_->suppressEosLogits(logits, eos_token_id_); }
     if (top_k_ > 0) {
       next_token_id = gen_->sampleTopK(logits, top_k_, temperature_);
     } else if (top_p_ > 0.0f) {
@@ -111,7 +112,7 @@ void ARGenerationChatIterator::step() {
       next_token_id = gen_->sampleTemperature(logits, temperature_);
     }
   } else {
-    next_token_id = gen_->sampleGreedy(logits);
+    next_token_id = gen_->selectGreedy(logits, step_count_ + 1 < min_new_tokens_, eos_token_id_);
   }
 
   current_step_.current_step = step_count_;
@@ -170,16 +171,17 @@ ARGenerationOutputPast ARGeneration::generate(const ARGenerationOutputPast& inpu
       decodeEventStartTimePoint();
     }
 
-    ARGenerationOutputPast output = forward(past, args);
+    ARGenerationOutputPast output = forwardForGeneration(past, args, !use_sampling);
 
     // Timing
     if (i == 0) { prefillEventEndTimePoint(); }
 
     Tensor logits = output["sequence"];
-    if (i + 1 < min_new_tokens) { suppressEosLogits(logits, eos_token_id); }
 
     int64_t next_token_id;
     if (use_sampling) {
+      logits = logits.to(kCPU);
+      if (i + 1 < min_new_tokens) { suppressEosLogits(logits, eos_token_id); }
       if (top_k > 0) {
         next_token_id = sampleTopK(logits, top_k, temperature);
       } else if (top_p > 0.0f) {
@@ -188,7 +190,7 @@ ARGenerationOutputPast ARGeneration::generate(const ARGenerationOutputPast& inpu
         next_token_id = sampleTemperature(logits, temperature);
       }
     } else {
-      next_token_id = sampleGreedy(logits);
+      next_token_id = selectGreedy(logits, i + 1 < min_new_tokens, eos_token_id);
     }
 
     generated_tokens.push_back(next_token_id);
@@ -204,8 +206,9 @@ ARGenerationOutputPast ARGeneration::generate(const ARGenerationOutputPast& inpu
 
     // [B, S]
     past = output;
-    past["sequence"] = Tensor::empty({1, 1}, kInt64, logits.device()).alloc();
+    past["sequence"] = Tensor::empty({1, 1}, kInt64, kCPU).alloc();
     past["sequence"].at<mllm_int64_t>({0, 0}) = next_token_id;
+    past["sequence"] = past["sequence"].to(generationInputDevice(logits));
   }
 
   generationEventEndTimePoint();
@@ -250,7 +253,7 @@ void ARGeneration::streamGenerate(const ARGenerationOutputPast& input, const ARG
       decodeEventStartTimePoint();
     }
 
-    ARGenerationOutputPast output = forward(past, args);
+    ARGenerationOutputPast output = forwardForGeneration(past, args, !use_sampling);
 
     // Timing
     if (i == 0) {
@@ -259,12 +262,12 @@ void ARGeneration::streamGenerate(const ARGenerationOutputPast& input, const ARG
     }
 
     Tensor logits = output["sequence"];
-    auto device = logits.device();
-    logits = logits.to(kCPU);
-    if (i + 1 < min_new_tokens) { suppressEosLogits(logits, eos_token_id); }
+    auto device = generationInputDevice(logits);
 
     int64_t next_token_id;
     if (use_sampling) {
+      logits = logits.to(kCPU);
+      if (i + 1 < min_new_tokens) { suppressEosLogits(logits, eos_token_id); }
       if (top_k > 0) {
         next_token_id = sampleTopK(logits, top_k, temperature);
       } else if (top_p > 0.0f) {
@@ -273,7 +276,7 @@ void ARGeneration::streamGenerate(const ARGenerationOutputPast& input, const ARG
         next_token_id = sampleTemperature(logits, temperature);
       }
     } else {
-      next_token_id = sampleGreedy(logits);
+      next_token_id = selectGreedy(logits, i + 1 < min_new_tokens, eos_token_id);
     }
 
     ar_steps_++;
@@ -388,6 +391,12 @@ void ARGeneration::perfSummary() {
   }
 }
 
+int64_t ARGeneration::selectGreedy(Tensor logits, bool suppress_eos, int64_t eos_token_id) {
+  logits=logits.to(kCPU);
+  if (suppress_eos) suppressEosLogits(logits,eos_token_id);
+  return sampleGreedy(logits);
+}
+
 __MLLM_UNSAFE_OPT_BEGIN_O3_FAST_MATH
 int64_t ARGeneration::sampleGreedy(Tensor& logits) {
   Tensor last_logits = getLastLogits(logits);
@@ -412,9 +421,8 @@ int64_t ARGeneration::sampleTemperature(Tensor& logits, float temperature) {
 
   Tensor probs = nn::functional::softmax(last_logits, -1);
 
-  // I NEED MORE MEMORY!
-  last_logits.delete_();
-  logits.delete_();
+  // last_logits may alias logits (including the caller's output).
+  // Let Tensor ownership release storage after sampling.
 
   // FIXME:
   // Prob may be in fp16 dtype. We need to handle it.
@@ -434,9 +442,8 @@ int64_t ARGeneration::sampleTopK(Tensor& logits, int k, float temperature) {
   // Get Softmax probabilities
   Tensor probs = nn::functional::softmax(last_logits, -1);
 
-  // I NEED MORE MEMORY!
-  last_logits.delete_();
-  logits.delete_();
+  // last_logits may alias logits (including the caller's output).
+  // Let Tensor ownership release storage after sampling.
 
   // FIXME:
   // Prob may be in fp16 dtype. We need to handle it.
@@ -471,9 +478,8 @@ int64_t ARGeneration::sampleTopP(Tensor& logits, float p, float temperature) {
 
   Tensor probs = nn::functional::softmax(last_logits, -1);
 
-  // I NEED MORE MEMORY!
-  last_logits.delete_();
-  logits.delete_();
+  // last_logits may alias logits (including the caller's output).
+  // Let Tensor ownership release storage after sampling.
 
   // FIXME:
   // Prob may be in fp16 dtype. We need to handle it.

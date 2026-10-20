@@ -3,6 +3,8 @@
 #pragma once
 
 #include "mllm/engine/ConfigFile.hpp"
+#include "mllm/core/aops/PagedAttnOp.hpp"
+#include <stdexcept>
 
 namespace mllm::models::qwen_ascend {
 
@@ -27,6 +29,16 @@ struct QwenAscendConfig : protected ConfigFile {
 
     tie_word_embeddings = data()["tie_word_embeddings"];
     max_cache_length = data()["max_cache_length"];
+    if (data().contains("paged_attention")) {
+      const auto& paged = data().at("paged_attention");
+      paged_attention_enabled = paged.value("enabled", false);
+      paged_radix_cache = paged.value("radix_cache", false);
+      paged_block_size = paged.value("block_size", 128);
+      paged_num_blocks = paged.value("num_blocks", 0);
+      const auto layout = paged.value("layout", std::string("NZ"));
+      if (layout != "ND" && layout != "NZ") { throw std::invalid_argument("paged_attention.layout must be ND or NZ"); }
+      paged_layout = layout == "NZ" ? aops::PagedAttnCacheLayout::kNZ : aops::PagedAttnCacheLayout::kND;
+    }
   }
 
   bool attention_bias = false;
@@ -46,6 +58,11 @@ struct QwenAscendConfig : protected ConfigFile {
 
   bool tie_word_embeddings = true;
   int32_t max_cache_length = 2048;
+  bool paged_attention_enabled = false;
+  bool paged_radix_cache = false;
+  int32_t paged_block_size = 128;
+  int32_t paged_num_blocks = 0;  // 0: one max-length request, plus one COW spare when radix caching is enabled.
+  aops::PagedAttnCacheLayout paged_layout = aops::PagedAttnCacheLayout::kNZ;
 };
 
 }  // namespace mllm::models::qwen_ascend

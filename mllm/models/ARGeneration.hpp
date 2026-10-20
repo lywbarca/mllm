@@ -130,6 +130,12 @@ class ARGeneration {
 
   virtual void perfSummary();
 
+  // Backends may keep logits on device only for greedy generation.
+  // Direct forward() retains its normal logits contract.
+  virtual ARGenerationOutputPast forwardForGeneration(const ARGenerationOutputPast& input,
+      const ARGenerationArgs& args, bool greedy) { return forward(input, args); }
+  virtual DeviceTypes generationInputDevice(const Tensor& logits) const { return logits.device(); }
+  virtual int64_t selectGreedy(Tensor logits, bool suppress_eos, int64_t eos_token_id);
   int64_t sampleGreedy(Tensor& logits);
 
   int64_t sampleTemperature(Tensor& logits, float temperature);

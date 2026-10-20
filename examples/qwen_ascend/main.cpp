@@ -225,8 +225,13 @@ MLLM_MAIN({
       model.clearCache();
       fmt::print("\nWarming up prefill path...\n");
       (void)model.forward(inputs, {});
-      // Keep RoPE cache warmed, but reset KV state for the measured generation.
-      model.kvCache().clearCache();
+      // Paged reset must also recreate the default request used by generation.
+      // The contiguous path can preserve its warmed RoPE cache.
+      if (model.kvCache().pagedCache()) {
+        model.clearCache();
+      } else {
+        model.kvCache().clearCache();
+      }
 
       fmt::print("\nAnswer:\n");
       auto chat_start = std::chrono::high_resolution_clock::now();

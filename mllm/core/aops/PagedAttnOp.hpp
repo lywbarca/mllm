@@ -13,6 +13,9 @@ enum class PagedAttnImplType {
   kAllFp32 = 1,
 };
 
+// Physical storage of block-based KV inputs on Ascend. This does not convert data.
+enum class PagedAttnCacheLayout { kND = 0, kNZ = 1 };
+
 struct PagedAttnOpOptions : public BaseOpOptions<PagedAttnOpOptions> {
   int32_t head_repeat_times = 1;
   bool high_precision_exp = false;
@@ -20,6 +23,7 @@ struct PagedAttnOpOptions : public BaseOpOptions<PagedAttnOpOptions> {
   bool need_attn_weights = false;
   PagedAttnImplType impl_type = PagedAttnImplType::kAllFp32;
   void* prefix_cache_ctx = nullptr;
+  PagedAttnCacheLayout kv_cache_layout = PagedAttnCacheLayout::kND;
 };
 
 class PagedAttnOp : public BaseOp {

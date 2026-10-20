@@ -264,6 +264,9 @@ AscendDeviceMetaInfo::AscendDeviceMetaInfo() {
     return;
   }
 
+  int32_t previous_device = 0;
+  if (aclrtGetDevice(&previous_device) != ACL_SUCCESS) previous_device = 0;
+
   // Collect info for each device
   for (uint32_t i = 0; i < device_count; ++i) {
     AscendDeviceInfo info;
@@ -294,6 +297,7 @@ AscendDeviceMetaInfo::AscendDeviceMetaInfo() {
 
     devices.push_back(info);
   }
+  if (device_count > 0) MLLM_ACL_CHECK(aclrtSetDevice(previous_device));
 
 #else
   // In CPU debug mode, add a dummy device

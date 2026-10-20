@@ -7,4 +7,4 @@ Ascend Backend
    setup_and_usage
    core_design
    qwen_ascend
-
+   paged_attention

@@ -10,7 +10,6 @@
 #include "mllm/engine/Context.hpp"
 #include "mllm/nn/Functional.hpp"
 #include "KernelTestHelper.hpp"
-#include "mllm/backends/cpu/kernels/common/ggml/quantize/quantize.hpp"
 #include "mllm/backends/ascend/AscendCommon.hpp"
 #include "mllm/backends/ascend/memory/AscendMemoryManager.hpp"
 #include <acl/acl.h>
@@ -52,6 +51,7 @@ class AscendLinearKernelTest : public KernelTest {
       // Weight shape for ATB: [K, N] where K=in_channels, N=out_channels
       Tensor weight_cpu = Tensor::random({in_channels, out_channels}, -0.5, 0.5, kFloat16, kCPU);
 
+      // Convert the typed half value numerically; ggml macros return raw FP16 bits on x86.
       // 2. Compute reference result on CPU
       // y = x @ weight, where x is [M, K], weight is [K, N], output is [M, N]
       auto output_shape = input_shape;
@@ -72,11 +72,11 @@ class AscendLinearKernelTest : public KernelTest {
           for (int o = 0; o < out_channels; ++o) {
             float sum = 0.0f;
             for (int i = 0; i < in_channels; ++i) {
-              float x_val = MLLM_FP16_TO_FP32(x_ptr[b * in_channels + i]);
-              float w_val = MLLM_FP16_TO_FP32(w_ptr[i * out_channels + o]);  // weight is [K, N]
+              float x_val = static_cast<float>(x_ptr[b * in_channels + i]);
+              float w_val = static_cast<float>(w_ptr[i * out_channels + o]);  // weight is [K, N]
               sum += x_val * w_val;
             }
-            r_ptr[b * out_channels + o] = MLLM_FP32_TO_FP16(sum);
+            r_ptr[b * out_channels + o] = static_cast<mllm_fp16_t>(sum);
           }
         }
       }
@@ -141,13 +141,13 @@ class AscendLinearKernelTest : public KernelTest {
           for (int o = 0; o < out_channels; ++o) {
             float sum = 0.0f;
             for (int i = 0; i < in_channels; ++i) {
-              float x_val = MLLM_FP16_TO_FP32(x_ptr[b * in_channels + i]);
-              float w_val = MLLM_FP16_TO_FP32(w_ptr[o * in_channels + i]);
+              float x_val = static_cast<float>(x_ptr[b * in_channels + i]);
+              float w_val = static_cast<float>(w_ptr[o * in_channels + i]);
               sum += x_val * w_val;
             }
-            float bias_val = MLLM_FP16_TO_FP32(b_ptr[o]);
+            float bias_val = static_cast<float>(b_ptr[o]);
             sum += bias_val;
-            r_ptr[b * out_channels + o] = MLLM_FP32_TO_FP16(sum);
+            r_ptr[b * out_channels + o] = static_cast<mllm_fp16_t>(sum);
           }
         }
       }
@@ -307,7 +307,7 @@ class AscendLinearKernelTest : public KernelTest {
       // -------------------------------------------------------------------
       Tensor x_fp16_cpu = Tensor::empty(input_shape, kFloat16, kCPU).alloc();
       for (size_t i = 0; i < num_tokens * in_channels; ++i) {
-        x_fp16_cpu.ptr<mllm_fp16_t>()[i] = MLLM_FP32_TO_FP16(x_fp32[i]);
+        x_fp16_cpu.ptr<mllm_fp16_t>()[i] = static_cast<mllm_fp16_t>(x_fp32[i]);
       }
       auto x_fp16_npu = x_fp16_cpu.to(kAscend);
 
@@ -392,7 +392,7 @@ class AscendLinearKernelTest : public KernelTest {
       float max_err = 0.0f;
       bool passed = true;
       for (size_t i = 0; i < num_tokens * out_channels; ++i) {
-        float got = MLLM_FP16_TO_FP32(yp[i]);
+        float got = static_cast<float>(yp[i]);
         float err = std::abs(got - y_ref[i]);
         float tol = 0.5f + 0.05f * std::abs(y_ref[i]);  // atol=0.5, rtol=5%
         if (err > tol) {

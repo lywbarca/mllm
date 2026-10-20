@@ -22,14 +22,17 @@ void AscendMemoryManager::createMemoryPool(size_t pool_size)
     uint32_t device_count = 0;
     auto ret = aclrtGetDeviceCount(&device_count);
     MLLM_ACL_CHECK(ret);
+    int32_t previous_device = 0;
+    if (aclrtGetDevice(&previous_device) != ACL_SUCCESS) previous_device = 0;
     for (size_t i = 0; i < device_count; i++) {
 
-        aclrtSetDevice(i);
+        MLLM_ACL_CHECK(aclrtSetDevice(i));
 
         std::shared_ptr<AscendMemoryPool> memory_pool = std::make_shared<AscendMemoryPool>(pool_size);
         memory_pools_.push_back(memory_pool);
         MLLM_INFO("create mempool for device {} success", i);
     }
+    if (device_count > 0) MLLM_ACL_CHECK(aclrtSetDevice(previous_device));
 }
 
 int32_t AscendMemoryManager::getDeviceId()

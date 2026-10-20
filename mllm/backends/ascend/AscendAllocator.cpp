@@ -22,23 +22,24 @@ AscendAllocator::~AscendAllocator() {
 
 bool AscendAllocator::alloc(Storage* storage) {
     auto& mem_manager = getAscendMemoryManager();
+    auto pool = mem_manager.getMemoryPool();
     int block_id = -1;
-    mem_manager.allocateBlock(storage->size_, block_id);
+    pool->allocateBlock(storage->size_, block_id);
     if (block_id < 0) {
         MLLM_ERROR("Failed to allocate block of size {} bytes from memory pool", storage->size_);
         return false;
     }
 
-    mem_manager.getBlockPtr(block_id, storage->ptr_);
+    pool->getBlockPtr(block_id, storage->ptr_);
     if (storage->ptr_ == nullptr) {
         MLLM_ERROR("Failed to get pointer for block ID {}", block_id);
-        mem_manager.freeBlock(block_id);
+        pool->freeBlock(block_id);
         return false;
     }
 
     {
         std::lock_guard<std::mutex> lock(block_map_mutex_);
-        storage_to_block_id_[storage->ptr_] = block_id;
+        storage_to_block_id_[storage->ptr_] = {pool, block_id};
     }
 
     MLLM_INFO("Allocated storage: size={} bytes, block ID={}, ptr={}",
@@ -60,17 +61,19 @@ void AscendAllocator::free(Storage* storage) {
     }
 
     int block_id = -1;
+    std::shared_ptr<AscendMemoryPool> pool;
     {
         std::lock_guard<std::mutex> lock(block_map_mutex_);
         auto it = storage_to_block_id_.find(storage->ptr_);
         if (it != storage_to_block_id_.end()) {
-            block_id = it->second;
+            block_id = it->second.block_id;
+            pool = it->second.pool;
             storage_to_block_id_.erase(it);
         }
     }
 
     if (block_id >= 0) {
-        getAscendMemoryManager().freeBlock(block_id);
+        pool->freeBlock(block_id);
         MLLM_INFO("Freed storage: block ID={}, ptr={}", block_id, storage->ptr_);
     } else {
         MLLM_WARN("Attempted to free storage with no block ID mapping: ptr={}", storage->ptr_);

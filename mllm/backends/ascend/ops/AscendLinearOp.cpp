@@ -9,6 +9,7 @@
 #include <atb/utils.h>
 #include <atb/infer_op_params.h>
 #include <utility>
+#include "mllm/backends/ascend/ops/AscendNZWeight.hpp"
 #include <vector>
 #include <string>
 
@@ -29,6 +30,7 @@ void AscendLinearOp::load(const ParameterFile::ptr_t& ploader) {
   // In that case, skip — model.load() will call us again with the real model file.
   if (!ploader->has(getName() + ".weight")) { return; }
 
+  nz_weight_ = Tensor::nil();
   scale_x_ = 0.0f;
   scale_w_ = Tensor::nil();
   scale_x_tensor_ = Tensor::nil();
@@ -139,6 +141,7 @@ void AscendLinearOp::load(const ParameterFile::ptr_t& ploader) {
       bias_ = convertTensorToAscendFP16(bias_);
     }
   }
+  nz_weight_ = packLinearWeightNZ(weight_);
 }
 
 ParameterFile::ptr_t AscendLinearOp::getParams() {
@@ -239,7 +242,9 @@ void AscendLinearOp::forward(const std::vector<Tensor>& inputs, std::vector<Tens
     auto* atb_ctx = getGlobalAtbContext();
     atb::Tensor atb_x, atb_w, atb_y, atb_bias;
     fillAtbTensor(x,           atb_x);
-    fillAtbTensor(*weight_ptr, atb_w);
+    const bool packed = inputs.size() == 1 && !nz_weight_.isNil();
+    fillAtbTensor(packed ? nz_weight_ : *weight_ptr, atb_w);
+    if (packed) atb_w.desc.format = ACL_FORMAT_FRACTAL_NZ;
     fillAtbTensor(y,           atb_y);
 
     atb::SVector<atb::Tensor> inTensors, outTensors;

@@ -15,6 +15,7 @@
 #include "mllm/backends/ascend/ops/AscendViewOp.hpp"
 #include "mllm/backends/ascend/ops/AscendMatMulOp.hpp"
 #include "mllm/backends/ascend/ops/AscendSoftmaxOp.hpp"
+#include "mllm/backends/ascend/ops/AscendPagedAttnOp.hpp"
 #include "mllm/backends/ascend/ops/AscendConcatOp.hpp"
 #include "mllm/backends/ascend/ops/AscendSliceOp.hpp"
 #include "mllm/backends/ascend/ops/AscendTransposeOp.hpp"
@@ -47,7 +48,8 @@ AscendBackend::AscendBackend() : Backend(kAscend, createAscendAllocator()) {
               AscendAddOpFactory,AscendSubOpFactory,AscendMulOpFactory,AscendX2XOpFactory,AscendSiLUOpFactory,
               AscendLinearOpFactory,AscendRMSNormOpFactory,AscendViewOpFactory,AscendMatMulOpFactory,AscendSoftmaxOpFactory,
               AscendConcatOpFactory, AscendSliceOpFactory,AscendTransposeOpFactory,AscendEmbeddingOpFactory,AscendGatherOpFactory,
-              AscendRoPEOpFactory,AscendFillOpFactory,AscendCopyOpFactory,AscendCausalMaskOpFactory>();
+              AscendRoPEOpFactory,AscendFillOpFactory,AscendCopyOpFactory,AscendCausalMaskOpFactory,
+              AscendPagedAttnOpFactory>();
   auto& devices = AscendDeviceMetaInfo::instance().devices;
   for (const auto& device : devices) {
     const auto bytes_to_mb = [](size_t bytes) { return bytes / (1024.0 * 1024.0); };
